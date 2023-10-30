@@ -20,6 +20,7 @@ import (
 	"github.com/cloud-bulldozer/k8s-netperf/pkg/netperf"
 	result "github.com/cloud-bulldozer/k8s-netperf/pkg/results"
 	"github.com/cloud-bulldozer/k8s-netperf/pkg/sample"
+	"github.com/cloud-bulldozer/k8s-netperf/pkg/uperf"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,7 +35,7 @@ var (
 	cfgfile     string
 	nl          bool
 	clean       bool
-	iperf3      bool
+	driver      string
 	acrossAZ    bool
 	full        bool
 	debug       bool
@@ -65,6 +66,11 @@ var rootCmd = &cobra.Command{
 
 		if debug {
 			log.SetDebug()
+		}
+
+		if driver != "uperf" && driver != "iperf" && driver != "netperf" {
+			log.Error("Supported drivers are netperf, iperf and uperf")
+			os.Exit(1)
 		}
 
 		cfg, err := config.ParseConf(cfgfile)
@@ -155,23 +161,11 @@ var rootCmd = &cobra.Command{
 			nc.AcrossAZ = acrossAZ
 
 			if s.HostNetwork {
-				npr := executeWorkload(nc, s, true, false)
+				npr := executeWorkload(nc, s, true, driver)
 				sr.Results = append(sr.Results, npr)
-				if iperf3 {
-					ipr := executeWorkload(nc, s, true, true)
-					if len(ipr.Profile) > 1 {
-						sr.Results = append(sr.Results, ipr)
-					}
-				}
 			}
-			npr := executeWorkload(nc, s, false, false)
+			npr := executeWorkload(nc, s, false, driver)
 			sr.Results = append(sr.Results, npr)
-			if iperf3 {
-				ipr := executeWorkload(nc, s, false, true)
-				if len(ipr.Profile) > 1 {
-					sr.Results = append(sr.Results, ipr)
-				}
-			}
 		}
 
 		var fTime time.Time
@@ -319,14 +313,16 @@ func cleanup(client *kubernetes.Clientset) {
 
 }
 
-func executeWorkload(nc config.Config, s config.PerfScenarios, hostNet bool, iperf3 bool) result.Data {
+func executeWorkload(nc config.Config, s config.PerfScenarios, hostNet bool, driver string) result.Data {
 	serverIP := ""
 	service := false
 	sameNode := true
 	Client := s.Client
 	if nc.Service {
 		service = true
-		if iperf3 {
+		if driver == "uperf" {
+			serverIP = s.UperfService.Spec.ClusterIP
+		} else if driver == "iperf" {
 			serverIP = s.IperfService.Spec.ClusterIP
 		} else {
 			serverIP = s.NetperfService.Spec.ClusterIP
@@ -346,7 +342,13 @@ func executeWorkload(nc config.Config, s config.PerfScenarios, hostNet bool, ipe
 		Client = s.ClientHost
 	}
 	npr := result.Data{}
-	if iperf3 {
+	if driver == "uperf" {
+		// uperf doesn't support TCP_CRR
+		if !uperf.TestSupported(nc.Profile) {
+			return npr
+		}
+	}
+	if driver == "iperf" {
 		// iperf doesn't support all tests cases
 		if !iperf.TestSupported(nc.Profile) {
 			return npr
@@ -367,7 +369,19 @@ func executeWorkload(nc config.Config, s config.PerfScenarios, hostNet bool, ipe
 	log.Debugf("Executing workloads. hostNetwork is %t, service is %t", hostNet, service)
 	for i := 0; i < nc.Samples; i++ {
 		nr := sample.Sample{}
-		if iperf3 {
+		if driver == "uperf" {
+			npr.Driver = "uperf"
+			r, err := uperf.Run(s.ClientSet, s.RestConfig, nc, Client, serverIP)
+			if err != nil {
+				log.Error(err)
+				os.Exit(1)
+			}
+			nr, err = uperf.ParseResults(&r)
+			if err != nil {
+				log.Error(err)
+				os.Exit(1)
+			}
+		} else if driver == "iperf" {
 			npr.Driver = "iperf3"
 			r, err := iperf.Run(s.ClientSet, s.RestConfig, nc, Client, serverIP)
 			if err != nil {
@@ -418,7 +432,7 @@ func executeWorkload(nc config.Config, s config.PerfScenarios, hostNet bool, ipe
 
 func main() {
 	rootCmd.Flags().StringVar(&cfgfile, "config", "netperf.yml", "K8s netperf Configuration File")
-	rootCmd.Flags().BoolVar(&iperf3, "iperf", false, "Use iperf3 as load driver (along with netperf)")
+	rootCmd.Flags().StringVar(&driver, "driver", "netperf", "netperf, iperf and uperf are supported load drivers. Pass one of them")
 	rootCmd.Flags().BoolVar(&clean, "clean", true, "Clean-up resources created by k8s-netperf")
 	rootCmd.Flags().BoolVar(&json, "json", false, "Instead of human-readable output, return JSON to stdout")
 	rootCmd.Flags().BoolVar(&nl, "local", false, "Run network performance tests with Server-Pods/Client-Pods on the same Node")
