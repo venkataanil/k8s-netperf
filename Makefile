@@ -15,7 +15,7 @@ BIN_PATH = $(BIN_DIR)/$(ARCH)/$(BIN)
 CGO = 0
 RHEL_VERSION = ubi9
 CONTAINER_BUILD ?= podman build --force-rm
-CONTAINER_NS ?= quay.io/cloud-bulldozer/netperf
+CONTAINER_NS ?= quay.io/vkommadi
 
 all: build container-build
 
